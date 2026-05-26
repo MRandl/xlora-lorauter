@@ -114,6 +114,7 @@ def main():
         BASE_MODEL,
         torch_dtype=torch.bfloat16,
         device_map="auto",
+        use_cache=False
     )
 
     model = xlora.add_xlora_to_model(
