@@ -13,25 +13,21 @@ from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
     AutoTokenizer,
-    DataCollatorForLanguageModeling,
+    DataCollatorForSeq2Seq,
     Trainer,
     TrainingArguments,
 )
 from datasets import Dataset
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
 BASE_MODEL = "meta-llama/Meta-Llama-3.1-8B"
 TRAIN_DATA = "dataset/config_large_flat.json"
 OUTPUT_DIR = "xlora_trained"
 MAX_SEQ_LEN = 512
 BATCH_SIZE = 4
-GRAD_ACCUM = 4          # effective batch = 16
+GRAD_ACCUM = 4
 EPOCHS = 3
 LR = 1e-4
 
-# All 48 NLP task adapters (igzi/lora-<task> on HuggingFace, base: Llama-3.1-8B)
 TASK_ADAPTERS = {
     "anli_r1":                    "igzi/lora-anli_r1",
     "anli_r2":                    "igzi/lora-anli_r2",
@@ -82,7 +78,6 @@ TASK_ADAPTERS = {
     "yelp_polarity_reviews":      "igzi/lora-yelp_polarity_reviews",
 }
 
-# Alpaca prompt template (matches adapter fine-tuning format)
 PROMPT_TEMPLATE = (
     "Below is an instruction that describes a task. "
     "Write a response that appropriately completes the request.\n\n"
@@ -90,18 +85,38 @@ PROMPT_TEMPLATE = (
 )
 
 
-def format_example(example: dict) -> str:
-    prompt = PROMPT_TEMPLATE.format(instruction=example["inputs"])
-    return prompt + example["targets"]
+def build_prompt(sample, template):
+    prompt = template.format(instruction=sample["inputs"])
+    full = prompt + sample["targets"]
+    return prompt, full
 
 
-def tokenize(examples, tokenizer):
-    return tokenizer(
-        examples["text"],
-        truncation=True,
-        max_length=MAX_SEQ_LEN,
-        padding=False,
-    )
+def tokenize_and_mask(batch, tokenizer, template, max_length):
+    prompts = []
+    full_texts = []
+    for i in range(len(batch[list(batch.keys())[0]])):
+        sample = {k: batch[k][i] for k in batch}
+        p, full = build_prompt(sample, template)
+        prompts.append(p)
+        full_texts.append(full)
+    if tokenizer.eos_token is not None:
+        full_texts = [ft + tokenizer.eos_token if not ft.endswith(tokenizer.eos_token) else ft for ft in full_texts]
+    tokenized_full = tokenizer(full_texts, truncation=True, max_length=max_length)
+    tokenized_prompt = tokenizer(prompts, truncation=True, max_length=max_length)
+    input_ids = tokenized_full["input_ids"]
+    attention_mask = tokenized_full.get("attention_mask")
+    labels = []
+    for full_ids, prompt_ids in zip(input_ids, tokenized_prompt["input_ids"]):
+        prompt_len = len(prompt_ids)
+        lab = [-100] * prompt_len + full_ids[prompt_len:]
+        lab = lab[: len(full_ids)]
+        if len(lab) < len(full_ids):
+            lab = lab + [-100] * (len(full_ids) - len(lab))
+        labels.append(lab)
+    ret = {"input_ids": input_ids, "labels": labels}
+    if attention_mask is not None:
+        ret["attention_mask"] = attention_mask
+    return ret
 
 
 def main():
@@ -133,14 +148,12 @@ def main():
     with open(TRAIN_DATA) as f:
         raw = json.load(f)
 
-    texts = [format_example(ex) for ex in raw]
-    dataset = Dataset.from_dict({"text": texts})
+    dataset = Dataset.from_list(raw)
     tokenized = dataset.map(
-        lambda ex: tokenize(ex, tokenizer),
+        lambda batch: tokenize_and_mask(batch, tokenizer, PROMPT_TEMPLATE, MAX_SEQ_LEN),
         batched=True,
-        remove_columns=["text"],
+        remove_columns=dataset.column_names,
     )
-    tokenized = tokenized.map(lambda ex: {"labels": ex["input_ids"]})
 
     training_args = TrainingArguments(
         output_dir=OUTPUT_DIR,
@@ -162,7 +175,7 @@ def main():
         model=model,
         args=training_args,
         train_dataset=tokenized,
-        data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False),
+        data_collator=DataCollatorForSeq2Seq(tokenizer, padding=True, pad_to_multiple_of=8),
     )
 
     trainer.train()
