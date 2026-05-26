@@ -22,9 +22,9 @@ from datasets import Dataset
 BASE_MODEL = "meta-llama/Meta-Llama-3.1-8B"
 TRAIN_DATA = "dataset/config_large_flat.json"
 OUTPUT_DIR = "xlora_trained"
-MAX_SEQ_LEN = 512
-BATCH_SIZE = 4
-GRAD_ACCUM = 4
+MAX_SEQ_LEN = 128
+BATCH_SIZE = 2
+GRAD_ACCUM = 8
 EPOCHS = 3
 LR = 1e-4
 
@@ -168,7 +168,7 @@ def main():
         warmup_ratio=0.05,
         lr_scheduler_type="cosine",
         report_to="none",
-        dataloader_num_workers=4,
+        dataloader_num_workers=0
     )
 
     trainer = Trainer(
